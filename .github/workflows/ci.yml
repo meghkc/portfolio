@@ -49,8 +49,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r constraints.txt
-          pip install .[dev] --no-deps
-          pip install -r requirements.txt --constraint constraints.txt --no-deps
+          pip install .[dev] --constraint constraints.txt
+          pip install -r requirements.txt --constraint constraints.txt
 
       - name: Show pip environment
         run: |
@@ -78,6 +78,7 @@ jobs:
           path: |
             portfolio_automation.log
             docs/images/composite_trends.png
+          if-no-files-found: ignore
 
   pip-compile-refresh:
     if: github.event_name == 'workflow_dispatch'
