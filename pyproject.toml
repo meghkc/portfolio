@@ -109,3 +109,16 @@ exclude = ["tests"]
 [tool.coverage.run]
 branch = true
 source = ["."]
+
+# Explicit module list so setuptools can build a wheel from flat layout
+[tool.setuptools]
+py-modules = [
+  "config",
+  "data_fetcher",
+  "email_sender",
+  "news_scraper",
+  "portfolio_manager",
+  "risk_analyzer",
+  "risk_visualization",
+  "main"
+]
