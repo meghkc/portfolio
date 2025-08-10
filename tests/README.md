@@ -16,9 +16,9 @@ tests/
 ## Running Tests
 
 ### Prerequisites
-Install development dependencies:
+Install development dependencies (extras):
 ```bash
-pip install -r requirements-dev.txt
+pip install .[dev]
 ```
 
 ### Run All Tests
@@ -185,8 +185,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install .[dev]
+          pip install -r requirements.txt --constraint constraints.txt
       - name: Run tests
         run: pytest tests/ --cov=. --cov-report=xml
 ```

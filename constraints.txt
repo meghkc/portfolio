@@ -1,0 +1,16 @@
+# Pinned transitive dependency versions for reproducible installs.
+# Generated baseline on 2025-08-10; update via `pip-compile` or periodic security review.
+
+beautifulsoup4==4.13.4
+lxml==6.0.0
+matplotlib==3.10.3
+numpy==2.3.2
+pandas==2.3.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.1.1
+requests==2.32.4
+schedule==1.2.2
+scipy==1.16.0
+textblob==0.19.0
+yfinance==0.2.65
+# Add additional resolved pins here as they become part of the runtime surface.

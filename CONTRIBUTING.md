@@ -12,10 +12,10 @@ Thank you for your interest in contributing to the Portfolio Automation System! 
 ### Development Setup
 
 1. **Fork and clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/portfolio-automation.git
-   cd portfolio-automation
-   ```
+    ```bash
+    git clone https://github.com/meghkc/portfolio.git
+    cd portfolio
+    ```
 
 2. **Create a virtual environment**
    ```bash
@@ -24,10 +24,10 @@ Thank you for your interest in contributing to the Portfolio Automation System! 
    ```
 
 3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   pip install -r requirements-dev.txt  # Development dependencies
-   ```
+    ```bash
+    pip install -r requirements.txt --constraint constraints.txt
+    pip install .[dev]  # Development & tooling extras
+    ```
 
 4. **Set up environment**
    ```bash
@@ -153,6 +153,7 @@ For new features, please:
 - [ ] No breaking changes (or clearly marked)
 - [ ] Follows existing code patterns
 - [ ] Includes example usage if applicable
+ - [ ] constraints.txt updated (only if dependency changes) via pip-compile
 
 ### Review Process
 1. Automated tests must pass
@@ -198,6 +199,13 @@ def test_full_portfolio_analysis():
 - Never log sensitive data (passwords, API keys)
 - Sanitize portfolio data in examples
 - Use environment variables for credentials
+ - Keep `.env` out of version control (already gitignored)
+
+### Repository Hygiene
+- Do not commit generated artifacts (logs, charts, CSV histories) unless explicitly required for docs.
+- Run `pytest -q` before pushing.
+- Regenerate pins: `pip-compile --output-file constraints.txt pyproject.toml` in a dedicated chore PR.
+- Security scans: `bandit -r .` and `safety check --full-report` locally prior to release tagging.
 - Validate all external data inputs
 
 ### API Security

@@ -6,6 +6,8 @@ Orchestrates data collection, analysis, rebalancing, and reporting
 import pandas as pd
 import numpy as np
 import logging
+import os
+import csv
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 
@@ -13,6 +15,7 @@ from data_fetcher import DataFetcher
 from risk_analyzer import RiskAnalyzer
 from news_scraper import NewsAnalyzer
 from email_sender import EmailSender
+from config import update_portfolio_prices  # re-export for backward compatibility with tests
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,10 @@ class PortfolioManager:
         }
         
         try:
+            # --- Configuration validation & normalization ---
+            config_warnings = self._validate_and_normalize_config()
+            if config_warnings:
+                report['data_warnings'].extend(config_warnings)
             # 1. Collect current data
 
             all_symbols = list(self.holdings.keys()) + list(self.watchlist.keys())
@@ -97,13 +104,14 @@ class PortfolioManager:
             performance_metrics = self._analyze_performance(historical_data)
             report['performance_metrics'] = performance_metrics
 
-            # 4. Risk analysis
+            # 4. Risk analysis (sentiment will be attached later once news is processed)
             risk_data = {
                 'weights': {symbol: info['target_weight'] for symbol, info in self.holdings.items()},
                 'returns_data': {symbol: data['Close'].pct_change().dropna() 
                                for symbol, data in historical_data.items() if not data.empty},
                 'historical_data': historical_data
             }
+            # placeholder; sentiment attribute may be set after news analysis and risk report can be regenerated if desired
             risk_analysis = self.risk_analyzer.generate_risk_report(risk_data)
             report['risk_analysis'] = risk_analysis
 
@@ -142,7 +150,7 @@ class PortfolioManager:
 
             # 5. Rebalancing recommendations
             rebalancing_recs = self._generate_rebalancing_recommendations(
-                current_prices, portfolio_metrics, risk_analysis
+                current_prices, portfolio_metrics, risk_analysis, historical_data=historical_data
             )
             report['rebalancing_recommendations'] = rebalancing_recs
 
@@ -151,10 +159,115 @@ class PortfolioManager:
             news_data = self.data_fetcher.fetch_news_for_symbols(portfolio_symbols)
             news_analysis = self.news_analyzer.analyze_news_sentiment(news_data)
             report['news_highlights'] = news_analysis
+            # Pass summarized symbol sentiments into risk analyzer and augment existing risk report
+            try:
+                symbol_sentiments = news_analysis.get('symbol_sentiments', {})
+                simplified = {sym: {'average_sentiment': data.get('average_sentiment', 0.0), 'article_count': data.get('article_count', 0)} for sym, data in symbol_sentiments.items()}
+                self.risk_analyzer.latest_sentiment = simplified
+                # Regenerate only sentiment portion without recomputing heavy metrics? Simpler to regenerate full risk report
+                updated_risk = self.risk_analyzer.generate_risk_report(risk_data)
+                # Retain previously computed chart path etc.
+                if 'risk_chart_path' in report:
+                    updated_risk['risk_chart_path'] = report['risk_chart_path']
+                report['risk_analysis'] = updated_risk
+                # Inject sentiment-driven weight tilt recommendations (non-binding)
+                try:
+                    sent_cfg = self.config['data'].get('sentiment', {})
+                    sent = updated_risk.get('sentiment', {})
+                    by_symbol = sent.get('by_symbol', {})
+                    if not by_symbol:
+                        raise ValueError('No symbol sentiment data')
+                    tilts = {}
+                    pos_budget = sent_cfg.get('global_positive_tilt_budget', 0.0)
+                    neg_budget = sent_cfg.get('global_negative_tilt_budget', 0.0)
+                    pos_thresh = sent_cfg.get('symbol_positive_threshold', 0.25)
+                    neg_thresh = sent_cfg.get('symbol_negative_threshold', -0.25)
+                    max_delta = sent_cfg.get('max_symbol_delta', 0.01)
+                    min_articles = sent_cfg.get('min_articles_for_action', 3)
+                    vol_guard = sent_cfg.get('volatility_guardrail', 0.80)
+                    dd_guard = sent_cfg.get('drawdown_guardrail', -0.30)
+                    neutral_band = sent_cfg.get('neutral_band', 0.15)
+                    exponent = sent_cfg.get('decay_exponent', 1.0)
+
+                    indiv_risks = updated_risk.get('individual_risks', {})
+
+                    # Build candidate lists
+                    positive_candidates = []
+                    negative_candidates = []
+                    for sym, data in by_symbol.items():
+                        score = data.get('score', 0.0)
+                        arts = data.get('articles', 0)
+                        if arts < min_articles or abs(score) < neutral_band:
+                            continue
+                        risks = indiv_risks.get(sym, {})
+                        vol = risks.get('volatility', 0)
+                        dd = risks.get('current_drawdown', 0)
+                        if score >= pos_thresh and vol < vol_guard and dd > dd_guard:
+                            positive_candidates.append((sym, score))
+                        elif score <= neg_thresh:
+                            negative_candidates.append((sym, score))
+
+                    # Allocate positive budget proportionally to powered scores
+                    def allocate_budget(candidates, budget, positive=True):
+                        if not candidates or budget == 0:
+                            return {}
+                        # Transform scores
+                        transformed = []
+                        for sym, sc in candidates:
+                            mag = abs(sc) ** exponent
+                            transformed.append((sym, mag))
+                        total = sum(m for _, m in transformed) or 1.0
+                        allocs = {}
+                        for sym, mag in transformed:
+                            raw = (mag / total) * abs(budget)
+                            raw = min(raw, max_delta)
+                            allocs[sym] = raw if positive else -raw
+                        return allocs
+
+                    if pos_budget > 0:
+                        tilts.update(allocate_budget(positive_candidates, pos_budget, positive=True))
+                    if neg_budget < 0:
+                        tilts.update(allocate_budget(negative_candidates, neg_budget, positive=False))
+
+                    if tilts:
+                        # Normalize if absolute sum exceeds combined budgets due to caps
+                        total_pos = sum(v for v in tilts.values() if v > 0)
+                        total_neg = sum(-v for v in tilts.values() if v < 0)
+                        scale_pos = min(1.0, (pos_budget or 1e-9) / total_pos) if pos_budget > 0 and total_pos > pos_budget else 1.0
+                        scale_neg = min(1.0, (abs(neg_budget) or 1e-9) / total_neg) if neg_budget < 0 and total_neg > abs(neg_budget) else 1.0
+                        report.setdefault('rebalancing_recommendations', {}).setdefault('sentiment_tilts', [])
+                        for sym, delta in tilts.items():
+                            scaled_delta = delta * (scale_pos if delta > 0 else scale_neg)
+                            cur_w = self.holdings.get(sym, {}).get('target_weight', 0)
+                            new_w = max(cur_w + scaled_delta, 0)
+                            report['rebalancing_recommendations']['sentiment_tilts'].append({
+                                'symbol': sym,
+                                'current_target_weight': cur_w,
+                                'suggested_target_weight': new_w,
+                                'delta': scaled_delta,
+                                'reason': f"Sentiment tilt (score {by_symbol.get(sym, {}).get('score',0):.2f})"
+                            })
+                except Exception as e:
+                    logger.warning(f"Failed to compute sentiment tilts: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to integrate sentiment into risk report: {e}")
 
             # 7. Watchlist analysis
             watchlist_analysis = self._analyze_watchlist_opportunities(current_prices)
             report['watchlist_analysis'] = watchlist_analysis
+            # Persist composite scores for trend analysis
+            try:
+                self._persist_watchlist_scores(watchlist_analysis.get('composite_scores', []), report['timestamp'])
+            except Exception as e:
+                logger.warning(f"Failed to persist watchlist composite scores: {e}")
+            # Generate composite trend chart
+            try:
+                from risk_visualization import plot_composite_trends
+                comp_chart = plot_composite_trends()
+                if comp_chart:
+                    report['composite_trends_chart_path'] = comp_chart
+            except Exception as e:
+                logger.warning(f"Composite trend plotting failed: {e}")
 
             # 8. Market outlook
             market_outlook = self._generate_market_outlook()
@@ -166,6 +279,62 @@ class PortfolioManager:
             logger.error(f"Failed to generate weekly report: {e}")
 
         return report
+
+    def _validate_and_normalize_config(self) -> List[str]:
+        """Validate holdings configuration and normalize target weights if needed.
+
+        Returns list of warning strings for inclusion in the report.
+        """
+        warnings = []
+        try:
+            weights = {sym: info.get('target_weight', 0) for sym, info in self.holdings.items()}
+            negative = [s for s, w in weights.items() if w is None or w < 0]
+            if negative:
+                warnings.append(f"Removed/zeroed negative target weights for: {', '.join(negative)}")
+                for s in negative:
+                    self.holdings[s]['target_weight'] = 0
+            total_weight = sum(w for w in weights.values() if w and w > 0)
+            if total_weight <= 0:
+                warnings.append("Total target weight is zero or negative; cannot normalize weights.")
+                return warnings
+            # If weights don't sum approximately to 1, normalize
+            if abs(total_weight - 1.0) > 0.02:  # >2% drift considered mis-specified
+                for s, info in self.holdings.items():
+                    w = info.get('target_weight', 0)
+                    info['target_weight'] = (w / total_weight) if total_weight > 0 else 0
+                warnings.append(f"Target weights normalized (original sum {total_weight:.3f}).")
+        except Exception as e:
+            logger.error(f"Config validation failed: {e}")
+        return warnings
+
+    def _persist_watchlist_scores(self, composite_scores: List[Dict], timestamp: datetime):
+        """Append composite watchlist scores to a CSV for longitudinal analysis.
+
+        File: watchlist_scores_history.csv with columns:
+        timestamp,symbol,composite_score,distance_to_target,momentum_20d,valuation_score,sentiment_score,entry_target,adjusted_entry_target,category
+        """
+        if not composite_scores:
+            return
+        filename = 'watchlist_scores_history.csv'
+        file_exists = os.path.isfile(filename)
+        fieldnames = ['timestamp','symbol','composite_score','distance_to_target','momentum_20d','valuation_score','sentiment_score','entry_target','adjusted_entry_target','category']
+        with open(filename, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            for row in composite_scores:
+                writer.writerow({
+                    'timestamp': timestamp.isoformat(),
+                    'symbol': row.get('symbol'),
+                    'composite_score': f"{row.get('composite_score',0):.6f}",
+                    'distance_to_target': f"{row.get('distance_to_target',0):.6f}",
+                    'momentum_20d': f"{row.get('momentum_20d',0):.6f}",
+                    'valuation_score': f"{row.get('valuation_score',0):.6f}",
+                    'sentiment_score': f"{row.get('sentiment_score',0):.6f}",
+                    'entry_target': row.get('entry_target'),
+                    'adjusted_entry_target': row.get('adjusted_entry_target'),
+                    'category': row.get('category')
+                })
     
     def _calculate_portfolio_metrics(self, current_prices: Dict[str, float], 
                                    historical_data: Dict[str, pd.DataFrame]) -> Dict:
@@ -224,7 +393,8 @@ class PortfolioManager:
             'worst_performers': [],
             'high_volatility_assets': [],
             'correlation_insights': [],
-            'sector_performance': {}
+            'sector_performance': {},
+            'attribution': {}
         }
         
         try:
@@ -260,6 +430,12 @@ class PortfolioManager:
 
             # Sector performance aggregation
             sector_performance = {}
+            sector_weights = {}
+            # Capture initial weights for simple attribution baseline (first day value proxies)
+            initial_prices = {}
+            for symbol, data in historical_data.items():
+                if data is not None and not data.empty and 'Close' in data:
+                    initial_prices[symbol] = data['Close'].iloc[0]
             for symbol, holding_info in self.holdings.items():
                 category = holding_info.get('category', 'other')
                 ytd_return = ytd_returns.get(symbol, None)
@@ -267,7 +443,13 @@ class PortfolioManager:
                     continue
                 if category not in sector_performance:
                     sector_performance[category] = []
+                    sector_weights[category] = []
                 sector_performance[category].append(ytd_return)
+                # Approximate weight using shares*last price (re-derive each loop for simplicity)
+                shares = holding_info.get('shares', 0)
+                last_price = historical_data.get(symbol, pd.DataFrame())['Close'].iloc[-1] if symbol in historical_data and not historical_data[symbol].empty else 0
+                value = shares * last_price
+                sector_weights[category].append(value)
 
             # Average sector returns
             for sector, returns in sector_performance.items():
@@ -284,13 +466,60 @@ class PortfolioManager:
 
             logger.info("Performance analysis completed")
 
+            # --- Simple Brinson-style attribution (allocation vs selection) by category ---
+            try:
+                total_port_value = 0
+                asset_values_end = {}
+                for symbol, info in self.holdings.items():
+                    data = historical_data.get(symbol)
+                    if data is None or data.empty or 'Close' not in data:
+                        continue
+                    end_price = data['Close'].iloc[-1]
+                    shares = info.get('shares', 0)
+                    val = shares * end_price
+                    asset_values_end[symbol] = val
+                    total_port_value += val
+                category_end_weights = {}
+                category_returns = {}
+                for symbol, val in asset_values_end.items():
+                    category = self.holdings[symbol].get('category', 'other')
+                    ret = ytd_returns.get(symbol, 0)
+                    category_returns.setdefault(category, []).append(ret)
+                    category_end_weights[category] = category_end_weights.get(category, 0) + val
+                for c in category_end_weights:
+                    category_end_weights[c] /= total_port_value if total_port_value > 0 else 1
+                # Benchmark: equal weight across categories as naive benchmark
+                categories = list(category_end_weights.keys())
+                if categories:
+                    bench_weight = 1 / len(categories)
+                    attribution = {}
+                    for c in categories:
+                        actual_w = category_end_weights[c]
+                        cat_ret = np.mean(category_returns.get(c, [0]))
+                        # Allocation effect: (actual_w - bench_w) * bench_return(=avg all categories)
+                        bench_return = np.mean([np.mean(category_returns[k]) for k in categories if category_returns.get(k)]) if categories else 0
+                        allocation_effect = (actual_w - bench_weight) * bench_return
+                        selection_effect = bench_weight * (cat_ret - bench_return)
+                        interaction_effect = (actual_w - bench_weight) * (cat_ret - bench_return)
+                        attribution[c] = {
+                            'weight': actual_w,
+                            'return': cat_ret,
+                            'allocation_effect': allocation_effect,
+                            'selection_effect': selection_effect,
+                            'interaction_effect': interaction_effect
+                        }
+                    performance['attribution'] = attribution
+            except Exception as e:
+                logger.warning(f"Attribution calculation failed: {e}")
+
         except Exception as e:
             logger.error(f"Performance analysis failed: {e}")
 
         return performance
     
     def _generate_rebalancing_recommendations(self, current_prices: Dict[str, float],
-                                            portfolio_metrics: Dict, risk_analysis: Dict) -> Dict:
+                                            portfolio_metrics: Dict, risk_analysis: Dict,
+                                            historical_data: Dict[str, pd.DataFrame] = None) -> Dict:
         """
         Generate specific rebalancing recommendations based on your strategy
         Implements the logic from your previous portfolio review
@@ -317,7 +546,8 @@ class PortfolioManager:
                 current_weight = current_allocations.get(symbol, 0)
                 target_weight = self.holdings[symbol]['target_weight']
                 
-                if drift > self.rebalancing_rules['min_rebalance_threshold']:
+                # Treat >= threshold as actionable to align with tests expecting action at exact value
+                if drift >= self.rebalancing_rules['min_rebalance_threshold']:
                     trim_amount = drift
                     recommendations['trim_positions'].append({
                         'symbol': symbol,
@@ -327,7 +557,7 @@ class PortfolioManager:
                         'reason': f"Over-allocated by {drift:.1%}"
                     })
                 
-                elif drift < -self.rebalancing_rules['min_rebalance_threshold']:
+                elif drift <= -self.rebalancing_rules['min_rebalance_threshold']:
                     add_amount = abs(drift)
                     recommendations['add_positions'].append({
                         'symbol': symbol,
@@ -410,6 +640,17 @@ class PortfolioManager:
                     'reason': 'Take profits after strong YTD gains'
                 })
             
+            # Enrich with technical indicators if historical data provided
+            if historical_data:
+                for pa in priority_actions:
+                    sym = pa.get('symbol')
+                    df = historical_data.get(sym)
+                    if df is not None and not df.empty and 'Close' in df:
+                        try:
+                            tech = self._compute_technical_indicators(df['Close'])
+                            pa['technicals'] = tech
+                        except Exception as e:
+                            logger.warning(f"Failed technicals for {sym}: {e}")
             recommendations['priority_actions'] = priority_actions
             
             logger.info(f"Generated {len(priority_actions)} priority rebalancing actions")
@@ -426,45 +667,123 @@ class PortfolioManager:
         opportunities = {
             'ready_to_buy': [],
             'approaching_targets': [],
-            'overpriced': []
+            'overpriced': [],
+            'composite_scores': []  # ranked list with composite watchlist intelligence
         }
         
         try:
+            # To compute momentum/valuation we may need historical data; attempt fetch for watchlist if not already
+            try:
+                historical_watch = self.data_fetcher.fetch_historical_data(list(self.watchlist.keys()), period="6mo")
+            except Exception:
+                historical_watch = {}
+
+            # Factor exposures for beta adjustments if available (market beta via risk_analysis stored somewhere?)
+            market_beta_shift = 0.0
+            try:
+                # Approximate using portfolio factor exposures if computed
+                # Placeholder: could integrate recent change in market volatility or factor trend; set static 0 for now
+                market_beta_shift = 0.0
+            except Exception:
+                market_beta_shift = 0.0
+
+            composite_entries = []
             for symbol, watchlist_info in self.watchlist.items():
                 current_price = current_prices.get(symbol, 0)
                 entry_target = watchlist_info['entry_target']
-                
-                if entry_target == 0:  # Add regardless of price
+                category = watchlist_info.get('category', 'other')
+
+                # Auto-adjust entry target based on beta shift (placeholder: if positive shift >0 raise targets modestly)
+                adjusted_entry = entry_target
+                if entry_target > 0 and market_beta_shift != 0:
+                    adjusted_entry = entry_target * (1 + 0.2 * market_beta_shift)  # dampened adjustment
+
+                # Momentum: 20d return (or shorter if limited data)
+                mom_score = 0.0
+                valuation_proxy = 0.0  # simplified: relative position vs 6m high/low
+                hist_df = historical_watch.get(symbol)
+                if hist_df is not None and not hist_df.empty and 'Close' in hist_df:
+                    closes = hist_df['Close'].dropna()
+                    if len(closes) >= 5:
+                        recent = closes.tail(21) if len(closes) >= 21 else closes
+                        mom_score = (recent.iloc[-1] / recent.iloc[0]) - 1
+                        six_high = closes.max()
+                        six_low = closes.min()
+                        if six_high > six_low:
+                            valuation_proxy = (recent.iloc[-1] - six_low) / (six_high - six_low)  # 0=cheap,1=expensive
+                            valuation_proxy = 1 - valuation_proxy  # invert so higher is cheaper / more attractive
+                # Distance to target (positive if below target, else negative)
+                distance = 0.0
+                if entry_target > 0 and current_price > 0:
+                    distance = (entry_target - current_price) / entry_target
+                # Sentiment placeholder: if we have risk_analyzer sentiment attach symbol score
+                sentiment_score = 0.0
+                try:
+                    sentiment = getattr(self.risk_analyzer, 'latest_sentiment', {})
+                    if symbol in sentiment:
+                        sentiment_score = sentiment[symbol].get('average_sentiment', 0.0)
+                except Exception:
+                    pass
+
+                # Normalize components to z-like scale / simple bounds
+                # Clamp extreme values
+                def clamp(v, lo, hi):
+                    return max(lo, min(hi, v))
+                mom_n = clamp(mom_score, -0.5, 0.5) / 0.5  # -1 to 1
+                val_n = clamp(valuation_proxy, 0, 1) * 2 - 1  # 0..1 -> -1..1
+                dist_n = clamp(distance, -0.5, 0.5) / 0.5  # -1..1
+                sent_n = clamp(sentiment_score, -0.5, 0.5) / 0.5  # -1..1
+                composite = 0.35 * dist_n + 0.25 * mom_n + 0.25 * val_n + 0.15 * sent_n
+
+                composite_entries.append({
+                    'symbol': symbol,
+                    'current_price': current_price,
+                    'entry_target': entry_target,
+                    'adjusted_entry_target': adjusted_entry,
+                    'category': category,
+                    'distance_to_target': distance,
+                    'momentum_20d': mom_score,
+                    'valuation_score': valuation_proxy,
+                    'sentiment_score': sentiment_score,
+                    'composite_score': composite
+                })
+
+                # Traditional buckets using adjusted entry
+                bucket_target = adjusted_entry
+                if entry_target == 0:  # unconditional add
                     opportunities['ready_to_buy'].append({
                         'symbol': symbol,
                         'current_price': current_price,
                         'reason': 'Strategic addition',
-                        'category': watchlist_info['category']
+                        'category': category
                     })
-                elif current_price <= entry_target:
+                elif current_price <= bucket_target:
                     opportunities['ready_to_buy'].append({
                         'symbol': symbol,
                         'current_price': current_price,
-                        'entry_target': entry_target,
-                        'discount': (entry_target - current_price) / entry_target,
-                        'category': watchlist_info['category']
+                        'entry_target': bucket_target,
+                        'discount': (bucket_target - current_price) / bucket_target if bucket_target else 0,
+                        'category': category
                     })
-                elif current_price <= entry_target * 1.05:  # Within 5% of target
+                elif current_price <= bucket_target * 1.05:
                     opportunities['approaching_targets'].append({
                         'symbol': symbol,
                         'current_price': current_price,
-                        'entry_target': entry_target,
-                        'premium': (current_price - entry_target) / entry_target,
-                        'category': watchlist_info['category']
+                        'entry_target': bucket_target,
+                        'premium': (current_price - bucket_target) / bucket_target if bucket_target else 0,
+                        'category': category
                     })
                 else:
                     opportunities['overpriced'].append({
                         'symbol': symbol,
                         'current_price': current_price,
-                        'entry_target': entry_target,
-                        'premium': (current_price - entry_target) / entry_target,
-                        'category': watchlist_info['category']
+                        'entry_target': bucket_target,
+                        'premium': (current_price - bucket_target) / bucket_target if bucket_target else 0,
+                        'category': category
                     })
+
+            # Rank composites descending
+            opportunities['composite_scores'] = sorted(composite_entries, key=lambda x: x['composite_score'], reverse=True)
             
             logger.info(f"Found {len(opportunities['ready_to_buy'])} immediate opportunities")
             
@@ -472,6 +791,72 @@ class PortfolioManager:
             logger.error(f"Watchlist analysis failed: {e}")
             
         return opportunities
+
+    def _compute_technical_indicators(self, close: pd.Series) -> Dict[str, float]:
+        """Compute selected technical indicators for enrichment.
+
+        Returns dict with:
+          ema_20 / ema_50 / ema_200
+          rsi_14 (Wilder)
+          macd (12-26 EMA diff)
+          macd_signal (9-period EMA of macd)
+          macd_hist (macd - signal)
+          interpretations (human readable brief meanings)
+        """
+        if close is None or close.empty:
+            return {}
+        s = close.dropna()
+        if s.empty:
+            return {}
+        ema20 = s.ewm(span=20, adjust=False).mean().iloc[-1] if len(s) >= 20 else float('nan')
+        ema50 = s.ewm(span=50, adjust=False).mean().iloc[-1] if len(s) >= 50 else float('nan')
+        ema200 = s.ewm(span=200, adjust=False).mean().iloc[-1] if len(s) >= 200 else float('nan')
+        # RSI 14
+        delta = s.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        roll_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+        roll_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+        rs = roll_gain / roll_loss
+        rsi = 100 - (100 / (1 + rs))
+        rsi_val = rsi.iloc[-1] if not rsi.empty else float('nan')
+        # MACD
+        ema12 = s.ewm(span=12, adjust=False).mean()
+        ema26 = s.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        hist = macd - signal
+        macd_val = macd.iloc[-1] if not macd.empty else float('nan')
+        signal_val = signal.iloc[-1] if not signal.empty else float('nan')
+        hist_val = hist.iloc[-1] if not hist.empty else float('nan')
+        latest_price = s.iloc[-1]
+        interp = []
+        if not pd.isna(ema20) and latest_price > ema20:
+            interp.append('Price > EMA20 (short-term strength)')
+        if not pd.isna(ema50) and latest_price > ema50:
+            interp.append('Price > EMA50 (medium trend up)')
+        if not pd.isna(ema200) and latest_price > ema200:
+            interp.append('Price > EMA200 (long-term uptrend)')
+        if not pd.isna(rsi_val):
+            if rsi_val > 70:
+                interp.append('RSI overbought')
+            elif rsi_val < 30:
+                interp.append('RSI oversold')
+        if not (pd.isna(macd_val) or pd.isna(signal_val)):
+            if macd_val > signal_val:
+                interp.append('MACD bullish')
+            else:
+                interp.append('MACD bearish')
+        return {
+            'ema_20': float(ema20),
+            'ema_50': float(ema50),
+            'ema_200': float(ema200),
+            'rsi_14': float(rsi_val),
+            'macd': float(macd_val),
+            'macd_signal': float(signal_val),
+            'macd_hist': float(hist_val),
+            'interpretations': interp
+        }
     
     def _generate_market_outlook(self) -> Dict:
         """Generate market outlook and macro analysis"""
@@ -533,6 +918,7 @@ class PortfolioManager:
         try:
             email_content = self._format_email_report(report)
             risk_chart_path = report.get('risk_chart_path')
+            # Prefer sending risk chart; composite trends could be optionally embedded later
             success = self.email_sender.send_portfolio_report(email_content, risk_chart_path=risk_chart_path)
 
             if success:
@@ -632,12 +1018,41 @@ class PortfolioManager:
         priority_actions = rebalancing.get('priority_actions', [])
 
         if priority_actions:
-            email_html += "<h2>Priority Rebalancing Actions</h2><ul>"
+            email_html += "<h2>Priority Rebalancing Actions</h2><table><tr><th>Action</th><th>Symbol</th><th>Reason</th><th>EMA20</th><th>EMA50</th><th>EMA200</th><th>RSI14</th><th>MACD</th><th>Signal</th><th>Hist</th></tr>"
             for action in priority_actions:
                 act = escape(action['action'])
                 sym = escape(action['symbol'])
                 reason = escape(action['reason'])
-                email_html += f"<li><strong>{act}</strong> {sym}: {reason}</li>"
+                tech = action.get('technicals', {})
+                ema20 = tech.get('ema_20', float('nan'))
+                ema50 = tech.get('ema_50', float('nan'))
+                ema200 = tech.get('ema_200', float('nan'))
+                rsi14 = tech.get('rsi_14', float('nan'))
+                macd_v = tech.get('macd', float('nan'))
+                macd_sig = tech.get('macd_signal', float('nan'))
+                macd_hist = tech.get('macd_hist', float('nan'))
+                email_html += (
+                    f"<tr><td>{act}</td><td>{sym}</td><td>{reason}</td>"
+                    f"<td>{ema20:.2f}</td><td>{ema50:.2f}</td><td>{ema200:.2f}</td>"
+                    f"<td>{rsi14:.1f}</td><td>{macd_v:.3f}</td><td>{macd_sig:.3f}</td><td>{macd_hist:.3f}</td></tr>"
+                )
+            email_html += "</table>"
+            # Per-symbol interpretations
+            sym_interps = [pa for pa in priority_actions if pa.get('technicals', {}).get('interpretations')]
+            if sym_interps:
+                email_html += "<h3>Technical Interpretations (Per Symbol)</h3>"
+                for pa in sym_interps:
+                    sym = escape(pa['symbol'])
+                    interps = pa['technicals']['interpretations']
+                    email_html += f"<p><strong>{sym}</strong></p><ul>"
+                    for it in interps:
+                        email_html += f"<li>{escape(it)}</li>"
+                    email_html += "</ul>"
+            # General legend
+            email_html += "<h3>Indicator Legend</h3><ul>"
+            email_html += "<li><strong>EMA20/50/200:</strong> Short/medium/long trend baselines; price above indicates uptrend for that horizon.</li>"
+            email_html += "<li><strong>RSI14:</strong> >70 overbought, <30 oversold (momentum/mean-reversion signal).</li>"
+            email_html += "<li><strong>MACD / Signal / Hist:</strong> MACD above Signal = bullish momentum; Histogram measures momentum of crossover.</li>"
             email_html += "</ul>"
 
         # Watchlist Opportunities
@@ -652,10 +1067,115 @@ class PortfolioManager:
                 reason = escape(opp.get('reason', 'Entry target reached'))
                 email_html += f"<li>{sym} at <strong>${price:.2f}</strong> - {reason}</li>"
             email_html += "</ul>"
+        # Composite Watchlist Intelligence
+        composite_scores = watchlist.get('composite_scores', [])
+        if composite_scores:
+            email_html += "<h2>Watchlist Composite Scores</h2><table><tr><th>Symbol</th><th>Composite</th><th>Dist</th><th>Mom 20d</th><th>Val</th><th>Sent</th><th>Adj Target</th></tr>"
+            for entry in composite_scores[:10]:  # top 10
+                email_html += (
+                    f"<tr><td>{escape(entry['symbol'])}</td>"
+                    f"<td>{entry['composite_score']:.2f}</td>"
+                    f"<td>{entry['distance_to_target']:.1%}</td>"
+                    f"<td>{entry['momentum_20d']:.1%}</td>"
+                    f"<td>{entry['valuation_score']:.2f}</td>"
+                    f"<td>{entry['sentiment_score']:.2f}</td>"
+                    f"<td>{entry['adjusted_entry_target']:.2f}</td></tr>"
+                )
+            email_html += "</table>"
+            # Inline composite trend chart (if generated)
+            comp_chart_path = report.get('composite_trends_chart_path')
+            if comp_chart_path and os.path.isfile(comp_chart_path):
+                try:
+                    import base64
+                    with open(comp_chart_path, 'rb') as img_f:
+                        encoded = base64.b64encode(img_f.read()).decode('utf-8')
+                    email_html += "<h3>Composite Score Trends</h3>"
+                    email_html += f"<img src='data:image/png;base64,{encoded}' alt='Composite Score Trends' style='max-width:100%;height:auto;border:1px solid #ccc;padding:4px;'/>"
+                except Exception as e:
+                    logger.warning(f"Failed to embed composite trends chart: {e}")
 
         # Risk Alerts
         risk_analysis = report.get('risk_analysis', {})
         risk_warnings = risk_analysis.get('risk_warnings', [])
+
+        # Inject newly added parametric VaR & risk contributions if present
+        parametric_var = risk_analysis.get('portfolio_metrics', {}).get('parametric_var') if risk_analysis else None
+        risk_contrib = risk_analysis.get('portfolio_metrics', {}).get('risk_contributions') if risk_analysis else None
+        if parametric_var:
+            email_html += "<h2>Parametric VaR (95%)</h2><ul>"
+            email_html += f"<li>Method: {escape(parametric_var.get('method',''))}</li>"
+            email_html += f"<li>Daily VaR: <strong>{parametric_var.get('daily_var',0):.2%}</strong></li>"
+            email_html += f"<li>Annualized VaR: <strong>{parametric_var.get('annual_var',0):.2%}</strong></li>"
+            email_html += f"<li>Daily Mean: {parametric_var.get('daily_mean',0):.3%}</li>"
+            email_html += f"<li>Daily Volatility: {parametric_var.get('daily_vol',0):.2%}</li>"
+            email_html += "</ul>"
+        if risk_contrib:
+            email_html += "<h2>Risk Contributions</h2><table><tr><th>Symbol</th><th>Weight</th><th>% Risk</th></tr>"
+            # Show top contributors first
+            sorted_rc = sorted(risk_contrib.items(), key=lambda x: x[1]['pct_risk_contribution'], reverse=True)
+            for symbol, metrics in sorted_rc[:10]:
+                email_html += f"<tr><td>{escape(symbol)}</td><td>{metrics['weight']:.1%}</td><td>{metrics['pct_risk_contribution']:.1%}</td></tr>"
+            email_html += "</table>"
+        monte_carlo_var = risk_analysis.get('portfolio_metrics', {}).get('monte_carlo_var') if risk_analysis else None
+        if monte_carlo_var:
+            email_html += "<h2>Monte Carlo VaR (95%)</h2><ul>"
+            email_html += f"<li>Daily Mean Simulated: {monte_carlo_var.get('mean',0):.3%}</li>"
+            email_html += f"<li>Daily Std Simulated: {monte_carlo_var.get('std',0):.2%}</li>"
+            email_html += f"<li>Simulated VaR: <strong>{monte_carlo_var.get('mc_var',0):.2%}</strong></li>"
+            email_html += f"<li>Simulated CVaR: <strong>{monte_carlo_var.get('mc_cvar',0):.2%}</strong></li>"
+            email_html += f"<li>Simulations: {monte_carlo_var.get('simulations')}</li>"
+            email_html += "</ul>"
+        rp_weights = risk_analysis.get('portfolio_metrics', {}).get('risk_parity_weights') if risk_analysis else None
+        if rp_weights:
+            email_html += "<h2>Risk Parity Suggested Weights</h2><table><tr><th>Symbol</th><th>Suggested Weight</th></tr>"
+            for sym, w in sorted(rp_weights.items(), key=lambda x: x[1], reverse=True):
+                email_html += f"<tr><td>{escape(sym)}</td><td>{w:.1%}</td></tr>"
+            email_html += "</table>"
+        rolling_metrics = risk_analysis.get('portfolio_metrics', {}).get('rolling_metrics') if risk_analysis else None
+        if rolling_metrics:
+            email_html += "<h2>Rolling 20d Metrics</h2><table><tr><th>Symbol</th><th>20d Vol</th><th>20d Return</th></tr>"
+            for sym, vals in rolling_metrics.items():
+                email_html += f"<tr><td>{escape(sym)}</td><td>{vals.get('rolling_vol_20d',0):.1%}</td><td>{vals.get('rolling_return_20d',0):.1%}</td></tr>"
+            email_html += "</table>"
+        # Sentiment summary (if integrated into risk report)
+        sentiment_section = risk_analysis.get('sentiment') if risk_analysis else None
+        if sentiment_section:
+            email_html += "<h2>News Sentiment</h2><ul>"
+            email_html += f"<li>Weighted Score: {sentiment_section.get('portfolio_weighted_score',0):.3f}</li>"
+            email_html += f"<li>Flag: {escape(sentiment_section.get('flag',''))}</li>"
+            email_html += "</ul><table><tr><th>Symbol</th><th>Score</th><th>Articles</th></tr>"
+            for sym, sdata in sentiment_section.get('by_symbol', {}).items():
+                email_html += f"<tr><td>{escape(sym)}</td><td>{sdata.get('score',0):.2f}</td><td>{sdata.get('articles',0)}</td></tr>"
+            email_html += "</table>"
+        # Stress tests
+        stress_tests = risk_analysis.get('stress_tests') if risk_analysis else None
+        if stress_tests:
+            email_html += "<h2>Stress Scenarios</h2><table><tr><th>Scenario</th><th>Pct Impact</th><th>P/L</th></tr>"
+            for st in stress_tests:
+                email_html += f"<tr><td>{escape(st.get('scenario',''))}</td><td>{st.get('portfolio_pct_impact',0):.1%}</td><td>{st.get('pnl',0):,.0f}</td></tr>"
+            email_html += "</table>"
+        factor_exp = risk_analysis.get('factor_exposures') if risk_analysis else None
+        if factor_exp:
+            # Show top few assets by absolute market beta
+            email_html += "<h2>Factor Exposures (Sample)</h2><table><tr><th>Symbol</th><th>Alpha</th><th>R2</th>"
+            # Determine factor columns dynamically
+            first_entry = next(iter(factor_exp.values()))
+            factor_cols = [c for c in first_entry.keys() if c not in ('alpha','r2','n')]
+            for fc in factor_cols:
+                email_html += f"<th>{escape(fc)}</th>"
+            email_html += "</tr>"
+            # Sort by |MKT| if exists else r2
+            def sort_key(item):
+                sym, vals = item
+                if 'MKT' in vals:
+                    return abs(vals['MKT'])
+                return vals.get('r2', 0)
+            for sym, vals in sorted(factor_exp.items(), key=sort_key, reverse=True)[:8]:
+                email_html += f"<tr><td>{escape(sym)}</td><td>{vals.get('alpha',0):.4f}</td><td>{vals.get('r2',0):.2f}</td>"
+                for fc in factor_cols:
+                    email_html += f"<td>{vals.get(fc,0):.2f}</td>"
+                email_html += "</tr>"
+            email_html += "</table>"
 
         if risk_warnings:
             email_html += "<h2>Risk Alerts</h2><ul>"

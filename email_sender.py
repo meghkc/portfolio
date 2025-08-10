@@ -32,7 +32,14 @@ class EmailSender:
             msg = MIMEMultipart('mixed')
             msg['Subject'] = f"Weekly Portfolio Review - {datetime.now().strftime('%B %d, %Y')}"
             msg['From'] = self.config['from_email']
-            msg['To'] = self.config['to_email']
+            to_list = self.config.get('to_emails') or [self.config.get('to_email')]
+            cc_list = self.config.get('cc_emails') or []
+            bcc_list = self.config.get('bcc_emails') or []
+            to_list = [t for t in to_list if t]
+            all_recipients = to_list + cc_list + bcc_list
+            msg['To'] = ', '.join(to_list)
+            if cc_list:
+                msg['Cc'] = ', '.join(cc_list)
 
             # Create both plain text and HTML versions
             text_content = self._convert_to_text(report_content)
@@ -69,7 +76,7 @@ class EmailSender:
                 logger.info(f"Attached CSV: {csv_path}")
 
             # Send email
-            success = self._send_email(msg)
+            success = self._send_email(msg, all_recipients)
 
             if success:
                 logger.info("Portfolio report email sent successfully (status: delivered)")
@@ -92,7 +99,14 @@ class EmailSender:
             msg = MIMEMultipart()
             msg['Subject'] = f"Portfolio Alert: {subject}"
             msg['From'] = self.config['from_email']
-            msg['To'] = self.config['to_email']
+            to_list = self.config.get('to_emails') or [self.config.get('to_email')]
+            cc_list = self.config.get('cc_emails') or []
+            bcc_list = self.config.get('bcc_emails') or []
+            to_list = [t for t in to_list if t]
+            all_recipients = to_list + cc_list + bcc_list
+            msg['To'] = ', '.join(to_list)
+            if cc_list:
+                msg['Cc'] = ', '.join(cc_list)
             
             if priority == 'high':
                 msg['X-Priority'] = '1'
@@ -113,19 +127,22 @@ Automated Portfolio Management System
             
             msg.attach(MIMEText(body, 'plain'))
             
-            return self._send_email(msg)
+            return self._send_email(msg, all_recipients)
             
         except Exception as e:
             logger.error(f"Alert email sending failed: {e}")
             return False
     
-    def _send_email(self, msg: MIMEMultipart) -> bool:
+    def _send_email(self, msg: MIMEMultipart, recipients: Optional[list] = None) -> bool:
         """Send email using SMTP"""
         try:
             with smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port']) as server:
                 server.starttls()
                 server.login(self.config['username'], self.config['password'])
-                server.send_message(msg)
+                if not recipients:
+                    recipients = [self.config.get('to_email')]
+                recipients = [r for r in recipients if r]
+                server.send_message(msg, to_addrs=recipients)
                 
             return True
             

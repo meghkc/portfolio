@@ -165,6 +165,9 @@ risk_chart.png
 .env
 .env.local
 .env.production
+*.png
+*.jpg
+*.jpeg
 
 # macOS
 .DS_Store

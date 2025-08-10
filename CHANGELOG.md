@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned Features
+### Added (Unreleased)
+- Parametric VaR (Gaussian + Cornish-Fisher) with skew/kurtosis adjustment
+- Monte Carlo VaR & CVaR simulations
+- Risk contributions & concentration metrics (HHI, Gini, effective holdings)
+- Risk parity indicative weights approximation
+- Rolling 20d volatility & return metrics
+- Stress scenario engine with configurable shocks
+- Multi-factor beta exposures (ETF proxies) with alpha & R²
+- Portfolio-wide sentiment integration & negative sentiment flag
+- Sentiment-driven rebalancing tilts (guardrails + budget)
+- Composite watchlist scoring & CSV history persistence
+- Composite score trend chart (base64 inline email embedding)
+- Performance attribution (category-level)
+- Enhanced README (advanced analytics, security, scenarios, factors, tilts)
+- Expanded SECURITY policy (threat model, SBOM, pinned constraints workflow)
+- PEP 621 metadata migration (pyproject.toml) & constraints-based reproducibility
+
+### Changed (Unreleased)
+- Adjusted development status classifier to Beta while new analytics stabilize
+- Refined setup extras (dev/test/security/docs/all) and pinned version ranges
+ - Removed legacy setup.py (PEP 621 pyproject.toml now authoritative)
+
+### Security (Unreleased)
+- Added guidance for SBOM generation and dependency pin refresh
+- Added bandit & safety integration advice
+
+### Documentation (Unreleased)
+- README sections for stress scenarios, factor exposures, sentiment tilts, composite scoring
+- SECURITY.md threat model & supply chain details
 - Web dashboard interface
 - Real-time alerts via Slack/Discord
 - Options analysis and strategies

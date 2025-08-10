@@ -284,8 +284,14 @@ class TestIntegration(unittest.TestCase):
                 chart_path = plot_portfolio_risk(portfolio_returns, tmp_file.name)
                 
                 # Cleanup
-                if os.path.exists(tmp_file.name):
-                    os.unlink(tmp_file.name)
+                tmp_path = tmp_file.name
+            # Ensure file handle is closed before deletion (Windows lock avoidance)
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except PermissionError:
+                    # Best effort: ignore if locked (artifact not critical for test)
+                    pass
             
             # Verify matplotlib was called
             mock_plt.figure.assert_called_once()

@@ -73,9 +73,11 @@ This application handles sensitive financial data. Key security areas:
 - Email content contains portfolio performance data
 
 #### External Dependencies
-- Regular updates of yfinance and other packages
-- Monitor for security advisories in dependencies
-- Validate external data sources
+-- Regular updates of yfinance and other packages
+-- Monitor for security advisories in dependencies (Dependabot / Safety)
+-- Validate external data sources (empty / malformed / extreme values)
+-- Use pinned transitive versions via `constraints.txt` for reproducibility
+-- Periodically regenerate constraints with `pip-compile` after review
 
 #### Data Logging
 - Avoid logging sensitive portfolio values
@@ -97,6 +99,9 @@ This application handles sensitive financial data. Key security areas:
 3. Use parameterized queries if adding database support
 4. Implement proper error handling without information disclosure
 5. Regular security code reviews
+6. Maintain SBOM (Software Bill of Materials) for dependency transparency
+7. Run `bandit` and `safety` in CI
+8. Avoid broad exception swallowing; log minimally on failures
 
 ### 📊 Vulnerability Severity Classification
 
@@ -129,6 +134,7 @@ For security-related concerns:
 3. **Testing**: Comprehensive security testing
 4. **Release**: Deploy fix with security advisory
 5. **Notification**: Inform users of security update
+6. **SBOM Refresh**: Regenerate SBOM and sign if applicable
 
 ### 📋 Security Checklist for Contributors
 
@@ -147,11 +153,47 @@ Before submitting code:
 - Environment variables for sensitive configuration
 - Consider encrypting portfolio data files
 - Secure file permissions on configuration files
+ - (Optional) Secrets manager (HashiCorp Vault / AWS Secrets Manager) for credential rotation
 
 #### Data in Transit
 - SMTP TLS encryption for email reports
 - HTTPS for all API communications
 - Validate SSL certificates
+ - Consider DANE / MTA-STS hardening for email where feasible
+
+### 🧪 Threat Model (High-Level)
+| Asset | Threats | Mitigations |
+|-------|---------|------------|
+| Credentials (.env) | Leakage via VCS or logs | .gitignore, environment variables, minimal logging |
+| Portfolio Holdings | Unauthorized disclosure | Local file permissions, avoid printing full positions |
+| Dependency Supply Chain | Malicious package update | Pinned constraints, safety scan, manual review |
+| Email Channel | Eavesdropping / MITM | STARTTLS/TLS, verified SMTP settings |
+| News / Market Data | Poisoned or malformed data | Input validation, NaN/drop checks, sanity bounds |
+| Generated Charts | Tampering (low risk) | Local generation, content hash (optional) |
+
+### 📦 Software Supply Chain
+- Maintain `constraints.txt` with exact versions
+- Regenerate using `pip-compile --generate-hashes`
+- Review diff before committing new pins
+- Optionally sign release artifacts (GPG) and publish checksums
+
+### 🧾 SBOM Generation
+Example (CycloneDX):
+```bash
+pip install cyclonedx-bom
+cyclonedx-py --format json -o sbom.json
+```
+Include `sbom.json` (and optionally `sbom.xml`) in releases.
+
+### 🧬 Data Integrity & Anomaly Handling
+- Detect sudden price spikes (>|40%| daily) and flag before VaR computation
+- Drop or winsorize outlier returns if necessary (future enhancement)
+- Maintain rolling window length checks; fallback gracefully if insufficient history
+
+### 🗂️ Logging Hygiene
+- Avoid logging raw credentials or full holding notional values
+- Use aggregated statistics (counts, totals) where possible
+- Rotate / truncate log files to reduce retention footprint
 
 ### ⚠️ Disclaimer
 

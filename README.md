@@ -2,6 +2,14 @@
 
 An intelligent, automated portfolio management system that provides comprehensive analysis, risk assessment, and rebalancing recommendations for your investment portfolio. The system runs scheduled weekly reports and includes advanced features like news sentiment analysis, risk visualization, and email notifications.
 
+<p align="center">
+    <!-- Badges: replace placeholder links when public -->
+    <img src="https://img.shields.io/badge/status-beta-blue" alt="Project Status" />
+    <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+    <img src="https://img.shields.io/badge/ci-github_actions-lightgrey" alt="CI" />
+    <img src="https://img.shields.io/badge/python-3.11%7C3.12%7C3.13-yellow" alt="Python Versions" />
+</p>
+
 ## 🌟 Features
 
 ### Core Functionality
@@ -12,14 +20,20 @@ An intelligent, automated portfolio management system that provides comprehensiv
 - **Email Reporting**: Automated HTML email reports with charts and actionable insights
 - **Watchlist Management**: Monitor potential investment opportunities with entry targets
 
-### Advanced Analytics
-- **Portfolio Volatility Calculation**: Using covariance matrix analysis
-- **Value at Risk (VaR)** and **Conditional VaR (CVaR)** calculations
-- **Sharpe and Sortino Ratio** computations
-- **Maximum Drawdown Analysis**
-- **Beta Calculation** vs benchmark (SPY)
-- **Concentration Risk Assessment** with Herfindahl-Hirschman Index
-- **Risk Visualization** with interactive charts
+### Advanced Analytics (Extended)
+- **Historical & Parametric VaR (Gaussian + Cornish-Fisher)** with skew/kurtosis adjustment
+- **Monte Carlo VaR & CVaR** (multivariate normal simulations)
+- **Risk Contributions** (marginal & % total) & concentration metrics (HHI, Gini, effective holdings)
+- **Portfolio Volatility (covariance matrix)** & correlation diagnostics
+- **Sharpe / Sortino / Drawdown** analytics
+- **Rolling Metrics** (20d rolling volatility & return per asset)
+- **Risk Parity Indicative Weights** (iterative approximation)
+- **Stress Scenarios** (configurable category/default shocks)
+- **Multi-Factor Betas** (ETF proxy factors with alpha & R²)
+- **Performance Attribution** (category-level contribution)
+- **Sentiment-Driven Tilts** and negative sentiment risk flag
+- **Composite Watchlist Scoring** (distance-to-target, momentum, valuation band, sentiment)
+- **Trend Visualization** (composite score history chart base64-embedded)
 
 ### Data Sources
 - **Market Data**: Yahoo Finance (yfinance) for real-time and historical prices
@@ -49,15 +63,24 @@ An intelligent, automated portfolio management system that provides comprehensiv
 ### Installation
 
 1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/portfolio-automation.git
-   cd portfolio-automation
-   ```
+    ```bash
+    git clone https://github.com/meghkc/portfolio.git
+    cd portfolio
+    ```
 
 2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+    ```bash
+    pip install -r requirements.txt --constraint constraints.txt
+    ```
+    (Using the provided `constraints.txt` improves reproducibility. Update pins periodically after security review.)
+
+    To refresh dependency pins (after installing dev extras which include pip-tools):
+    ```bash
+    pip install .[dev]
+    pip-compile --generate-hashes --output-file=constraints.txt pyproject.toml
+    ```
+
+    PEP 621 metadata is defined in `pyproject.toml`; legacy `setup.py` has been removed (PEP 517 build).
 
 3. **Configure environment**
    ```bash
@@ -127,9 +150,14 @@ The system generates comprehensive weekly reports including:
 
 ### Risk Analysis
 - Portfolio volatility and correlation matrix
-- Value at Risk (5% VaR) and Conditional VaR
+- Historical / Parametric (Gaussian & Cornish-Fisher) / Monte Carlo VaR & CVaR
 - Sharpe and Sortino ratios
 - Maximum drawdown analysis
+- Risk contributions & concentration diagnostics (HHI, Gini, effective holdings)
+- Rolling volatility / rolling returns
+- Stress scenario impacts with portfolio % effect and P/L
+- Multi-factor betas (factor exposures & alpha, R²)
+- Indicative risk parity weights
 
 ### Rebalancing Recommendations
 - **Trim Positions**: Over-allocated holdings
@@ -137,10 +165,14 @@ The system generates comprehensive weekly reports including:
 - **New Entries**: Watchlist opportunities
 - **Risk Adjustments**: High volatility warnings
 
-### News Sentiment
-- Symbol-specific sentiment scores
+### News Sentiment & Watchlist Intelligence
+- Symbol-specific sentiment scores & article counts
+- Portfolio-weighted sentiment score & NEGATIVE_SENTIMENT_RISK flag
 - Market themes and catalyst alerts
 - Price-moving news identification
+- Sentiment-driven rebalancing tilt adjustments (budgeted & bounded)
+- Composite watchlist scoring (0–100) + CSV persistence (`watchlist_scores_history.csv`)
+- Embedded watchlist composite trend chart
 
 ## 🔧 Advanced Usage
 
@@ -167,7 +199,7 @@ schedule.every().monday.at("07:30").do(run_weekly_portfolio_review)
 schedule.every().day.at("09:00").do(run_daily_check)  # Daily checks
 ```
 
-## 🛡️ Risk Management Features
+## 🛡️ Risk Management & Intelligence Features
 
 ### Automated Alerts
 - High volatility warnings (>60%)
@@ -175,11 +207,13 @@ schedule.every().day.at("09:00").do(run_daily_check)  # Daily checks
 - Concentration risk notifications
 - News-driven catalyst alerts
 
-### Portfolio Protection
+### Portfolio Protection & Optimization
 - Maximum position size limits
 - Crypto allocation caps
 - Volatility threshold monitoring
 - Correlation risk assessment
+- Sentiment tilt guardrails & budget constraints
+- Indicative risk parity targets for optional allocation guidance
 
 ## 🧪 Testing
 
@@ -192,8 +226,21 @@ python -c "from email_sender import EmailSender; from config import EMAIL_CONFIG
 # Test data fetching
 python -c "from data_fetcher import DataFetcher; from config import PORTFOLIO_CONFIG; print(DataFetcher(PORTFOLIO_CONFIG).fetch_current_prices(['AAPL']))"
 
-# Test news analysis
-python test_newsintegration.py
+# Test news analysis (integration tests live under tests/)
+pytest -k news --maxfail=1 -q
+```
+
+### Continuous Integration
+GitHub Actions workflow (`.github/workflows/ci.yml`) executes on pushes & PRs:
+- Constraints drift check (pip-compile vs committed `constraints.txt`)
+- Install & test (pytest)
+- Bandit static analysis
+- Safety vulnerability scan
+- Artifact upload (logs, trend chart)
+
+Manual pin refresh workflow available via dispatch. Local Windows helper:
+```powershell
+./scripts/update_pins.ps1
 ```
 
 ## 📝 Dependencies
@@ -212,9 +259,15 @@ Core packages required:
 ## 🚨 Important Notes
 
 ### Security
-- **Never commit `.env` file** with real credentials
-- Use app passwords for Gmail (not your regular password)
-- Consider using environment variables in production
+- **Never commit `.env`** or credentials
+- Use app passwords (Gmail) / token-based auth
+- Environment variables or secrets manager in production
+- Pin dependencies via `constraints.txt` (refresh with `pip-compile`)
+- Run security scanners: `bandit -r .`, `safety check --full-report`
+- Optional SBOM generation: `cyclonedx-py --format json -o sbom.json`
+- Minimal logging of sensitive values (avoid raw holdings in debug logs)
+- Validate external data (empty frames, NaNs) before risk computations
+- Graceful fallbacks for chart generation and network failures
 
 ### Data Accuracy
 - Market data depends on yfinance API availability
@@ -253,6 +306,11 @@ Future enhancements planned:
 - [ ] Web dashboard interface
 - [ ] Backtesting framework
 - [ ] Tax-loss harvesting automation
+- [ ] Enhanced factor library (macro & style expansion)
+- [ ] Historical regime stress replay & scenario generator
+- [ ] Optimization engine (risk budgeting / convex allocation)
+- [ ] Explainable AI sentiment classifier (beyond polarity)
+- [ ] Advanced attribution (Brinson-Fachler multi-level)
 
 ---
 

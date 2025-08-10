@@ -202,6 +202,27 @@ class TestRiskAnalyzer(unittest.TestCase):
             if symbol in individual_risks:
                 self.assertIn('weight', individual_risks[symbol])
                 self.assertIn('volatility', individual_risks[symbol])
+
+        # New: parametric VaR presence
+        parametric = risk_report['portfolio_metrics'].get('parametric_var')
+        self.assertIsInstance(parametric, dict)
+        self.assertIn('daily_var', parametric)
+        # New: risk contributions
+        rc = risk_report['portfolio_metrics'].get('risk_contributions')
+        self.assertIsInstance(rc, dict)
+        # Contributions sum approx 1
+        if rc:
+            total_pct = sum(v['pct_risk_contribution'] for v in rc.values())
+            self.assertAlmostEqual(total_pct, 1.0, places=2)
+        # Monte Carlo VaR presence
+        self.assertIn('monte_carlo_var', portfolio_metrics)
+        mc = portfolio_metrics['monte_carlo_var']
+        self.assertIn('mc_var', mc)
+        self.assertIn('mc_cvar', mc)
+        # Risk parity suggested weights
+        self.assertIn('risk_parity_weights', portfolio_metrics)
+        # Rolling metrics
+        self.assertIn('rolling_metrics', portfolio_metrics)
     
     def test_generate_risk_warnings(self):
         """Test risk warning generation"""
@@ -230,5 +251,21 @@ class TestRiskAnalyzer(unittest.TestCase):
         warning_text = ' '.join(warnings)
         self.assertIn('volatility', warning_text.lower())
 
+    def test_sentiment_integration(self):
+        portfolio_data = {
+            'weights': self.sample_weights,
+            'returns_data': self.sample_returns,
+            'historical_data': {
+                symbol: pd.DataFrame({'Close': np.cumprod(1 + returns)})
+                for symbol, returns in self.sample_returns.items()
+            }
+        }
+        # Inject fake sentiment alternating signs
+        self.risk_analyzer.latest_sentiment = {sym: {'average_sentiment': 0.3 if i % 2 == 0 else -0.1, 'article_count': 5} for i, sym in enumerate(portfolio_data['weights'].keys())}
+        report = self.risk_analyzer.generate_risk_report(portfolio_data)
+        self.assertIn('sentiment', report)
+        sent = report['sentiment']
+        self.assertIn('portfolio_weighted_score', sent)
+        self.assertIn('by_symbol', sent)
 if __name__ == '__main__':
     unittest.main()
