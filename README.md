@@ -104,6 +104,40 @@ An intelligent, automated portfolio management system that provides comprehensiv
 
 ## ⚙️ Configuration
 
+### Bring Your Own Portfolio (Clone-Friendly Setup)
+When someone clones this repository they likely have different holdings and watchlist. To avoid editing tracked source files (and accidentally committing private position sizes), you can supply a personal override file:
+
+1. Copy the template:
+     ```bash
+     cp portfolio_config.example.json portfolio_config.json
+     ```
+2. Edit `portfolio_config.json` with your real `holdings`, optional `watchlist`, and any `rebalancing` rule tweaks.
+3. (Optional) Point to a different file via environment variable:
+     ```bash
+     set PORTFOLIO_CONFIG_FILE=my_private_config.json   # Windows PowerShell
+     ```
+4. Run the app; on import `config.py` will merge your overrides. Only keys you provide replace defaults.
+
+Notes:
+- `portfolio_config.json` is git-ignored by default (see `.gitignore`).
+- Structure example (`portfolio_config.example.json`):
+    ```json
+    {
+        "holdings": {
+            "AAPL": {"shares": 25, "target_weight": 0.08, "category": "consumer_tech"},
+            "MSFT": {"shares": 10, "target_weight": 0.07, "category": "tech"}
+        },
+        "watchlist": {
+            "NVDA": {"entry_target": 90, "target_weight": 0.05, "category": "semiconductors"}
+        },
+        "rebalancing": {"max_position_size": 0.15}
+    }
+    ```
+- Do not add `current_price` fields; they are populated dynamically.
+- Categories are free-form but consistent naming improves stress / factor analysis.
+
+If you prefer environment-only customization you can skip the JSON and directly edit `config.py`, but the override approach is safer for collaboration.
+
 ### Portfolio Holdings (`config.py`)
 Define your current holdings with shares, target weights, and categories:
 

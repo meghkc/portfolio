@@ -1,0 +1,15 @@
+{
+  "holdings": {
+    "AAPL": {"shares": 25, "target_weight": 0.08, "category": "consumer_tech"},
+    "MSFT": {"shares": 10, "target_weight": 0.07, "category": "tech"},
+    "SPY": {"shares": 15, "target_weight": 0.12, "category": "etf"}
+  },
+  "watchlist": {
+    "GOOGL": {"entry_target": 150, "target_weight": 0.05, "category": "tech"},
+    "AMZN": {"entry_target": 100, "target_weight": 0.05, "category": "e_commerce"}
+  },
+  "rebalancing": {
+    "max_position_size": 0.15,
+    "cash_buffer_target": 0.04
+  }
+}
