@@ -24,6 +24,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
+      - name: Early diagnostics
+        run: |
+          set -euxo pipefail
+          python -V
+          python -c "import sys,platform;print('Platform:',platform.platform());print('Prefix:',sys.prefix)"
+          pip --version
+          pip debug --verbose || true
+          echo "Attempting verbose pip-tools install (will re-run in normal step)."
+          pip install -vvv pip-tools || echo "pip-tools initial install failed (will attempt again)."
+
       - name: Install pip-tools
         run: |
           python -m pip install --upgrade pip
