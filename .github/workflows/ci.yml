@@ -37,9 +37,25 @@ jobs:
           diff -u constraints.txt temp_constraints.txt || (echo "Constraints drift detected. Run pip-compile --generate-hashes and commit updated constraints.txt" && exit 1)
 
       - name: Install project (with dev extras)
+        if: matrix.python-version != '3.13'
         run: |
+          pip install --upgrade pip
+          pip install .[dev]
+          pip install -r requirements.txt
+
+      - name: Install project (with dev extras + constraints)
+        if: matrix.python-version == '3.13'
+        run: |
+          pip install --upgrade pip
           pip install .[dev]
           pip install -r requirements.txt --constraint constraints.txt
+
+      - name: Show pip environment
+        run: |
+          python -V
+          pip --version
+          pip list --format=columns | sort | head -n 40
+          echo "Installed package count:" $(pip list --format=freeze | wc -l)
 
       - name: Run tests
         run: pytest -q
