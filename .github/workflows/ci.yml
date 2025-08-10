@@ -39,26 +39,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install pip-tools
 
-      - name: Verify constraints consistency (only on 3.13)
-        if: matrix.python-version == '3.13'
+      - name: Verify constraints consistency (only on baseline Python 3.11)
+        if: matrix.python-version == '3.11'
         run: |
-          # Re-generate constraints with same flags used to create committed file
           pip-compile --generate-hashes --output-file temp_constraints.txt pyproject.toml
           diff -u constraints.txt temp_constraints.txt || (echo "Constraints drift detected. Run pip-compile --generate-hashes and commit updated constraints.txt" && exit 1)
 
-      - name: Install project (with dev extras)
-        if: matrix.python-version != '3.13'
+      - name: Install project (with dev extras + unified constraints)
         run: |
           pip install --upgrade pip
-          pip install .[dev]
-          pip install -r requirements.txt
-
-      - name: Install project (with dev extras + constraints)
-        if: matrix.python-version == '3.13'
-        run: |
-          pip install --upgrade pip
-          pip install .[dev]
-          pip install -r requirements.txt --constraint constraints.txt
+          pip install -r constraints.txt
+          pip install .[dev] --no-deps
+          pip install -r requirements.txt --constraint constraints.txt --no-deps
 
       - name: Show pip environment
         run: |
