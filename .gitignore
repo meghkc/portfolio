@@ -198,3 +198,7 @@ data/
 backups/
 exports/
 portfolio_config.json
+
+# Legacy build scripts (removed and intentionally ignored)
+setup.py
+requirements-dev.txt
