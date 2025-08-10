@@ -11,6 +11,7 @@ jobs:
   build-test-security:
     runs-on: ubuntu-latest
     strategy:
+  fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
@@ -28,10 +29,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pip-tools
 
-      - name: Verify constraints consistency
+      - name: Verify constraints consistency (only on 3.13)
+        if: matrix.python-version == '3.13'
         run: |
-          pip-compile --quiet --output-file temp_constraints.txt pyproject.toml
-          diff -u constraints.txt temp_constraints.txt || (echo "Constraints drift detected. Run pip-compile and commit updated constraints.txt" && exit 1)
+          # Re-generate constraints with same flags used to create committed file
+          pip-compile --generate-hashes --output-file temp_constraints.txt pyproject.toml
+          diff -u constraints.txt temp_constraints.txt || (echo "Constraints drift detected. Run pip-compile --generate-hashes and commit updated constraints.txt" && exit 1)
 
       - name: Install project (with dev extras)
         run: |
